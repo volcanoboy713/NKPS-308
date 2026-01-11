@@ -1,0 +1,439 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, onSnapshot, collection } from 'firebase/firestore';
+import { Trophy, User, Cpu, ChevronRight, AlertCircle, MousePointer2, Eraser, PenTool, Swords, StickyNote, ArrowUpCircle, ArrowDownCircle, Share2 } from 'lucide-react';
+
+// Firebase 配置 (由環境提供)
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'multiplication-battle-v1';
+
+const App = () => {
+  // 遊戲與使用者狀態
+  const [user, setUser] = useState(null);
+  const [gameState, setGameState] = useState('start'); 
+  const [scores, setScores] = useState({ player: 0, cpu: 0 });
+  const [task, setTask] = useState(null); 
+  const [playerHand, setPlayerHand] = useState([]);
+  const [cpuHand, setCpuHand] = useState([]);
+  const [playerSlots, setPlayerSlots] = useState([null, null, null]);
+  const [cpuSlots, setCpuSlots] = useState([null, null, null]);
+  const [playerAnswer, setPlayerAnswer] = useState('');
+  const [roundWinner, setRoundWinner] = useState(null);
+  const [message, setMessage] = useState('');
+  
+  // 電腦等級與進度
+  const [cpuLevel, setCpuLevel] = useState(0);
+  const [perfectCountInPhase, setPerfectCountInPhase] = useState(0);
+  const [winCountInPhase, setWinCountInPhase] = useState(0);
+  const [totalRoundsInPhase, setTotalRoundsInPhase] = useState(0);
+  
+  // 過場動畫狀態
+  const [levelChangeOverlay, setLevelChangeOverlay] = useState(null); 
+
+  const canvasRef = useRef(null);
+  const [isDrawing, setIsDrawing] = useState(false);
+
+  // 初始化匿名身份
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        await signInAnonymously(auth);
+      } catch (error) {
+        console.error("匿名登入失敗", error);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (currUser) => {
+      if (currUser) setUser(currUser);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const levels = [
+    { name: "小朋友", emoji: "👶", color: "text-green-700", bg: "bg-green-100/80" },
+    { name: "大人", emoji: "🧑", color: "text-blue-700", bg: "bg-blue-100/80" },
+    { name: "老人", emoji: "🧓", color: "text-orange-700", bg: "bg-orange-100/80" }
+  ];
+
+  const getBestPossible = useCallback((hand, currentTask) => {
+    const permutations = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+    let bestVal = currentTask === 'larger' ? -1 : Infinity;
+    let bestS = [];
+    
+    permutations.forEach(p => {
+      const s = [hand[p[0]], hand[p[1]], hand[p[2]]];
+      if (s[0] === 0) return; 
+      const val = (s[0] * 10 + s[1]) * s[2];
+      if (currentTask === 'larger') {
+        if (val > bestVal) { bestVal = val; bestS = s; }
+      } else {
+        if (val < bestVal) { bestVal = val; bestS = s; }
+      }
+    });
+    return { value: bestVal, slots: bestS };
+  }, []);
+
+  const prepareCards = useCallback(() => {
+    const allNumbers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+    const shuffled = [...allNumbers].sort(() => Math.random() - 0.5);
+    setPlayerHand(shuffled.slice(0, 3));
+    setCpuHand(shuffled.slice(3, 6));
+    setTask(null);
+    setPlayerSlots([null, null, null]);
+    setCpuSlots([null, null, null]);
+    setPlayerAnswer('');
+    setRoundWinner(null);
+    setMessage('');
+    setGameState('drawing');
+  }, []);
+
+  const startNewGame = () => {
+    setScores({ player: 0, cpu: 0 });
+    setCpuLevel(0);
+    setPerfectCountInPhase(0);
+    setWinCountInPhase(0);
+    setTotalRoundsInPhase(0);
+    setLevelChangeOverlay(null);
+    prepareCards();
+  };
+
+  useEffect(() => {
+    const handleResize = () => {
+      if (canvasRef.current) {
+        const canvas = canvasRef.current;
+        const parent = canvas.parentElement;
+        canvas.width = parent.clientWidth;
+        canvas.height = parent.clientHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.strokeStyle = '#334155'; 
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+      }
+    };
+    window.addEventListener('resize', handleResize);
+    handleResize();
+    return () => window.removeEventListener('resize', handleResize);
+  }, [gameState]);
+
+  const startDrawing = (e) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const clientX = (e.clientX || (e.touches && e.touches[0].clientX));
+    const clientY = (e.clientY || (e.touches && e.touches[0].clientY));
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const ctx = canvas.getContext('2d');
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    setIsDrawing(true);
+  };
+
+  const draw = (e) => {
+    if (!isDrawing) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const clientX = (e.clientX || (e.touches && e.touches[0].clientX));
+    const clientY = (e.clientY || (e.touches && e.touches[0].clientY));
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const ctx = canvas.getContext('2d');
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    if (e.cancelable) e.preventDefault();
+  };
+
+  const stopDrawing = () => setIsDrawing(false);
+  const clearCanvas = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  };
+
+  const handleSlotClick = (index) => {
+    if (gameState !== 'playing') return;
+    if (playerSlots[index] !== null) {
+      const num = playerSlots[index];
+      const newSlots = [...playerSlots];
+      newSlots[index] = null;
+      setPlayerSlots(newSlots);
+      setPlayerHand([...playerHand, num]);
+    }
+  };
+
+  const handleHandClick = (num) => {
+    if (gameState !== 'playing') return;
+    const emptyIndex = playerSlots.findIndex(s => s === null);
+    if (emptyIndex !== -1) {
+      if (emptyIndex === 0 && num === 0) {
+        setMessage('0 不能放在前面喔！');
+        return;
+      }
+      const newSlots = [...playerSlots];
+      newSlots[emptyIndex] = num;
+      setPlayerSlots(newSlots);
+      setPlayerHand(playerHand.filter(n => n !== num));
+      setMessage('');
+    }
+  };
+
+  const handleSubmit = () => {
+    if (playerSlots.some(s => s === null)) {
+      setMessage('請填滿格子！');
+      return;
+    }
+    const playerVal = (playerSlots[0] * 10 + playerSlots[1]) * playerSlots[2];
+    if (parseInt(playerAnswer) !== playerVal) {
+      setMessage(`答案不對喔，再算算看！`);
+      return;
+    }
+
+    const playerBest = getBestPossible([...playerSlots, ...playerHand], task);
+    const isPlayerPerfect = playerVal === playerBest.value;
+    
+    let finalCpuSlots = [];
+    const bestCpu = getBestPossible(cpuHand, task).slots;
+    if (cpuLevel === 0) {
+      const perms = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]].filter(p => cpuHand[p[0]] !== 0);
+      const randP = perms[Math.floor(Math.random() * perms.length)];
+      finalCpuSlots = [cpuHand[randP[0]], cpuHand[randP[1]], cpuHand[randP[2]]];
+    } else if (cpuLevel === 1) {
+      finalCpuSlots = Math.random() < 0.5 ? bestCpu : [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]].filter(p => cpuHand[p[0]] !== 0).map(p => [cpuHand[p[0]], cpuHand[p[1]], cpuHand[p[2]]])[0];
+    } else {
+      finalCpuSlots = bestCpu;
+    }
+    setCpuSlots(finalCpuSlots);
+
+    const cVal = (finalCpuSlots[0] * 10 + finalCpuSlots[1]) * finalCpuSlots[2];
+    let winner = playerVal === cVal ? 'draw' : (task === 'larger' ? (playerVal > cVal ? 'player' : 'cpu') : (playerVal < cVal ? 'player' : 'cpu'));
+    
+    const newPerfectCount = isPlayerPerfect ? perfectCountInPhase + 1 : perfectCountInPhase;
+    const newWinCount = winner === 'player' ? winCountInPhase + 1 : winCountInPhase;
+    const newRoundCount = totalRoundsInPhase + 1;
+
+    if (newRoundCount >= 2) {
+      if (newPerfectCount >= 2) {
+        if (cpuLevel < 2) {
+            setLevelChangeOverlay('up');
+            setTimeout(() => setLevelChangeOverlay(null), 2500);
+            setCpuLevel(prev => prev + 1);
+        }
+      } else if (newWinCount === 0 && newPerfectCount === 0) {
+        if (cpuLevel > 0) {
+            setLevelChangeOverlay('down');
+            setTimeout(() => setLevelChangeOverlay(null), 2500);
+            setCpuLevel(prev => prev - 1);
+        }
+      }
+      setPerfectCountInPhase(0);
+      setWinCountInPhase(0);
+      setTotalRoundsInPhase(0);
+    } else {
+      setPerfectCountInPhase(newPerfectCount);
+      setWinCountInPhase(newWinCount);
+      setTotalRoundsInPhase(newRoundCount);
+    }
+
+    setRoundWinner(winner);
+    setScores(prev => ({ player: winner === 'player' ? prev.player + 1 : prev.player, cpu: winner === 'cpu' ? prev.cpu + 1 : prev.cpu }));
+    setGameState('roundResult');
+  };
+
+  const NumberCard = ({ num, onClick, small, isCpu }) => (
+    <button
+      onClick={() => onClick && onClick(num)}
+      className={`${small ? 'w-10 h-14 md:w-12 md:h-16 text-xl md:text-2xl' : 'w-14 h-20 md:w-20 md:h-28 text-3xl md:text-5xl'} 
+        rounded-sm flex items-center justify-center font-sans font-black transition-all shadow-md transform active:scale-95
+        ${isCpu ? 'bg-amber-50 text-slate-400 border-2 border-slate-200' : 'bg-white text-indigo-900 border-b-4 border-r-4 border-slate-300'}`}
+      style={{ backgroundImage: 'radial-gradient(#e5e7eb 1px, transparent 1px)', backgroundSize: '10px 10px' }}
+    >
+      {num === null ? "" : num}
+    </button>
+  );
+
+  return (
+    <div className="h-screen bg-[#dccbb4] p-2 md:p-3 font-sans select-none flex flex-col overflow-hidden relative" style={{backgroundImage: 'repeating-linear-gradient(90deg, transparent, transparent 50px, rgba(0,0,0,0.02) 50px, rgba(0,0,0,0.02) 51px)'}}>
+      
+      {/* 等級變動過場動畫 */}
+      {levelChangeOverlay && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm animate-in fade-in duration-500">
+            <div className={`p-6 md:p-8 rounded-3xl shadow-2xl flex flex-col items-center gap-4 transform animate-in zoom-in slide-in-from-bottom-10 duration-700 ${levelChangeOverlay === 'up' ? 'bg-amber-50 border-4 border-amber-400' : 'bg-blue-50 border-4 border-blue-400'}`}>
+                {levelChangeOverlay === 'up' ? (
+                    <>
+                        <div className="bg-amber-400 p-3 rounded-full text-white animate-bounce shadow-lg"><ArrowUpCircle size={48}/></div>
+                        <h2 className="text-2xl md:text-4xl font-black text-amber-900 font-sans">對手變強了！</h2>
+                        <div className="text-xl md:text-2xl font-bold text-amber-700 flex items-center gap-3 font-sans">
+                            {levels[Math.max(0, cpuLevel-1)].name} → <span className="text-2xl md:text-3xl font-sans">{levels[cpuLevel].emoji} {levels[cpuLevel].name}</span>
+                        </div>
+                    </>
+                ) : (
+                    <>
+                        <div className="bg-blue-400 p-3 rounded-full text-white animate-bounce shadow-lg"><ArrowDownCircle size={48}/></div>
+                        <h2 className="text-2xl md:text-4xl font-black text-blue-900 font-sans">對手換人了...</h2>
+                        <div className="text-xl md:text-2xl font-bold text-blue-700 flex items-center gap-3 font-sans">
+                            {levels[Math.min(2, cpuLevel+1)].name} → <span className="text-2xl md:text-3xl font-sans">{levels[cpuLevel].emoji} {levels[cpuLevel].name}</span>
+                        </div>
+                    </>
+                )}
+            </div>
+        </div>
+      )}
+
+      {/* Header */}
+      <div className="flex justify-between items-center mb-2 shrink-0 bg-[#c4a484] p-2 md:p-3 rounded-xl border-b-4 border-[#a67c52] shadow-sm">
+        <div className="flex items-center gap-2 md:gap-3">
+          <div className="bg-[#5d4037] p-1.5 rounded-lg text-amber-100 shadow-inner"><Trophy size={18} /></div>
+          <h1 className="text-lg md:text-2xl font-black text-[#3e2723] font-sans">乘法桌遊課</h1>
+          <div className={`flex items-center gap-1.5 px-2 md:px-4 py-1 rounded-lg border border-[#a67c52] text-sm md:text-lg font-black shadow-inner ${levels[cpuLevel].bg}`}>
+              <span className={`${levels[cpuLevel].color} font-sans`}>{levels[cpuLevel].emoji} {levels[cpuLevel].name}</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 md:gap-4">
+            <div className="bg-[#fef9c3] px-3 md:px-6 py-1 md:py-2 rounded-lg shadow-md border-2 border-[#fde047] font-black text-lg md:text-2xl text-amber-900 font-sans">
+            {scores.player}:{scores.cpu}
+            </div>
+        </div>
+      </div>
+
+      <div className="flex-1 flex gap-4 min-h-0">
+        {/* 左側：主區 (手機上為全螢幕) */}
+        <div className="flex-1 bg-[#fdfbf7] rounded-xl shadow-2xl border-l-4 md:border-l-[12px] border-l-[#e2e8f0] border border-slate-300 flex flex-col relative overflow-hidden" style={{backgroundImage: 'linear-gradient(#f1f5f9 1px, transparent 1px)', backgroundSize: '100% 3rem'}}>
+          {!user ? (
+            <div className="flex-1 flex flex-col items-center justify-center text-center p-6">
+                <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-[#5d4037] mb-4"></div>
+                <div className="text-lg font-black text-[#5d4037] font-sans">載入中...</div>
+            </div>
+          ) : (
+            <>
+                {gameState === 'start' && (
+                    <div className="flex-1 flex flex-col items-center justify-center text-center p-6 relative">
+                    <div className="w-20 h-20 bg-amber-100 rounded-full flex items-center justify-center text-amber-800 mb-6 shadow-inner border-2 border-amber-200"><User size={40} /></div>
+                    <h2 className="text-2xl md:text-4xl font-black text-[#3e2723] mb-6 font-sans">準備好開始了嗎？</h2>
+                    <button onClick={startNewGame} className="bg-[#8d6e63] hover:bg-[#6d4c41] text-white text-2xl md:text-3xl font-black py-4 md:py-6 px-10 md:px-16 rounded-xl shadow-[0_6px_0_rgb(62,39,35)] active:translate-y-1 active:shadow-none font-sans">翻開題卡</button>
+                    </div>
+                )}
+
+                {gameState === 'drawing' && (
+                    <div className="flex-1 flex flex-col items-center justify-center">
+                    <div className="bg-amber-100/80 border-2 border-amber-300 p-3 md:p-4 rounded-xl mb-8 flex items-center gap-3 text-amber-900 text-lg md:text-2xl font-black animate-pulse font-sans"><MousePointer2 size={24} /> 點擊桌面上的卡片</div>
+                    <button onClick={() => setGameState('pickingTask')} className="group relative w-28 h-40 md:w-36 md:h-52 bg-[#5d4037] rounded-xl border-4 border-[#3e2723] shadow-2xl flex items-center justify-center transform active:scale-95 transition-all">
+                        <span className="text-amber-100 font-black text-5xl md:text-7xl opacity-80 font-sans">?</span>
+                    </button>
+                    </div>
+                )}
+
+                {gameState === 'pickingTask' && (
+                    <div className="flex-1 flex flex-col items-center justify-between p-4 md:p-6">
+                    <div className="w-full flex justify-around items-start">
+                        <div className="text-center">
+                        <div className="text-sm font-black text-[#5d4037] border-b-2 border-amber-200 mb-2 font-sans">我的數字</div>
+                        <div className="flex gap-1">{playerHand.map((n, i) => <NumberCard key={i} num={n} small />)}</div>
+                        </div>
+                        <div className="text-center">
+                        <div className="text-sm font-black text-slate-400 border-b-2 border-slate-100 mb-2 font-sans">對手的數字</div>
+                        <div className="flex gap-1">{cpuHand.map((n, i) => <NumberCard key={i} num={n} isCpu small />)}</div>
+                        </div>
+                    </div>
+
+                    <div className="flex-1 flex flex-col items-center justify-center w-full">
+                        <h3 className="text-xl md:text-3xl font-black text-slate-800 mb-6 font-sans text-center">任務挑戰？</h3>
+                        <div className="flex gap-6 md:gap-10">
+                        <button onClick={() => setTask('larger')} className="w-28 h-36 md:w-32 md:h-40 bg-white rounded-lg shadow-lg flex flex-col items-center justify-center text-red-600 border-2 border-red-100 transform active:scale-95">
+                            <span className="text-4xl mb-1">🔥</span>
+                            <span className="font-black text-xl md:text-2xl font-sans">比大</span>
+                        </button>
+                        <button onClick={() => setTask('smaller')} className="w-28 h-36 md:w-32 md:h-40 bg-white rounded-lg shadow-lg flex flex-col items-center justify-center text-blue-600 border-2 border-blue-100 transform active:scale-95">
+                            <span className="text-3xl mb-1">❄️</span>
+                            <span className="font-black text-xl md:text-2xl font-sans">比小</span>
+                        </button>
+                        </div>
+                    </div>
+
+                    {task && (
+                        <div className="w-full">
+                        <button onClick={() => setGameState('playing')} className="w-full bg-[#3e2723] text-amber-100 text-xl md:text-3xl font-black py-4 md:py-5 rounded-xl shadow-lg font-sans">
+                            {task === 'larger' ? '比大' : '比小'}！開始
+                        </button>
+                        </div>
+                    )}
+                    </div>
+                )}
+
+                {(gameState === 'playing' || gameState === 'roundResult') && (
+                    <div className="flex-1 flex flex-col p-3 md:p-5 space-y-3 md:space-y-4 font-sans">
+                    <div className={`text-center py-2 md:py-3 rounded-lg font-black text-lg md:text-2xl text-white shadow-md font-sans ${task === 'larger' ? 'bg-red-700' : 'bg-blue-700'}`}>
+                        目標：{task === 'larger' ? '最大' : '最小'}！
+                    </div>
+
+                    <div className="flex-1 flex flex-col justify-center space-y-3 md:space-y-4">
+                        <div className={`p-3 md:p-5 rounded-xl border-2 ${gameState === 'playing' ? 'bg-[#fffbeb] border-amber-300 border-dashed' : 'bg-white border-slate-200'} shadow-inner`}>
+                        <div className="flex items-center justify-center gap-2 md:gap-3">
+                            {[0, 1].map(i => <div key={i} onClick={() => handleSlotClick(i)} className="w-12 h-18 md:w-20 md:h-28 border-2 border-slate-300 rounded-lg flex items-center justify-center text-3xl md:text-6xl font-black bg-white text-[#3e2723] cursor-pointer shadow-sm font-sans">{playerSlots[i]}</div>)}
+                            <span className="text-xl md:text-3xl font-black text-slate-300 font-sans">×</span>
+                            <div onClick={() => handleSlotClick(2)} className="w-12 h-18 md:w-20 md:h-28 border-2 border-slate-300 rounded-lg flex items-center justify-center text-3xl md:text-6xl font-black bg-white text-[#3e2723] cursor-pointer shadow-sm font-sans">{playerSlots[2]}</div>
+                            <span className="text-xl md:text-3xl font-black text-slate-300 font-sans">=</span>
+                            {gameState === 'playing' ? <input type="number" value={playerAnswer} onChange={(e) => setPlayerAnswer(e.target.value)} placeholder="?" className="w-20 md:w-36 h-18 md:h-28 border-2 border-[#5d4037] rounded-lg text-center text-2xl md:text-5xl font-black text-[#3e2723] outline-none shadow-md bg-[#fff9c4] font-sans"/> : <div className="w-20 md:w-36 h-18 md:h-28 border-2 border-[#5d4037] bg-[#fff9c4] rounded-lg flex items-center justify-center text-2xl md:text-5xl font-black text-[#3e2723] font-sans">{playerAnswer}</div>}
+                        </div>
+                        </div>
+
+                        {gameState === 'playing' && <div className="flex justify-center gap-2 md:gap-4 py-2">{playerHand.map((n, i) => <NumberCard key={i} num={n} onClick={handleHandClick} />)}</div>}
+
+                        {gameState === 'roundResult' && (
+                        <div className="space-y-3 md:space-y-4">
+                            <div className="p-3 md:p-4 rounded-xl border-2 bg-slate-100/50 border-slate-300">
+                            <div className="flex items-center justify-center gap-2 text-xl md:text-3xl font-black text-slate-600 font-sans">
+                                <div className="w-10 h-14 bg-white border border-slate-300 rounded-lg flex items-center justify-center">{cpuSlots[0]}</div>
+                                <div className="w-10 h-14 bg-white border border-slate-300 rounded-lg flex items-center justify-center">{cpuSlots[1]}</div>
+                                <span>×</span>
+                                <div className="w-10 h-14 bg-white border border-slate-300 rounded-lg flex items-center justify-center">{cpuSlots[2]}</div>
+                                <span>=</span>
+                                <div className="w-18 h-14 bg-slate-200 border border-slate-400 rounded-lg flex items-center justify-center px-2">{(cpuSlots[0]*10+cpuSlots[1])*cpuSlots[2]}</div>
+                            </div>
+                            </div>
+                            <div className="flex flex-col items-center">
+                            <div className={`text-2xl md:text-4xl font-black mb-4 md:mb-6 px-8 md:px-12 py-2 md:py-3 rounded-lg shadow-lg font-sans ${roundWinner === 'player' ? 'bg-green-600 text-white' : roundWinner === 'cpu' ? 'bg-red-600 text-white' : 'bg-slate-600 text-white'}`}>
+                                {roundWinner === 'player' ? '★ 你贏了 ★' : roundWinner === 'cpu' ? '對手贏了' : '雙方平手'}
+                            </div>
+                            <button onClick={prepareCards} className="w-full max-w-sm bg-[#5d4037] text-white py-4 md:py-5 rounded-xl font-black text-xl md:text-3xl shadow-[0_4px_0_rgb(62,39,35)] transition-all hover:bg-[#4e342e] active:translate-y-1 active:shadow-none font-sans">
+                                下一回合
+                            </button>
+                            </div>
+                        </div>
+                        )}
+                    </div>
+
+                    {gameState === 'playing' && (
+                        <div className="shrink-0">
+                        <button onClick={handleSubmit} className="w-full bg-[#8d6e63] text-white font-black py-4 md:py-5 rounded-xl shadow-[0_4px_0_rgb(62,39,35)] text-xl md:text-3xl flex items-center justify-center gap-2 hover:bg-[#795548] active:translate-y-1 active:shadow-none font-sans"><Swords size={24} /> 確認戰果</button>
+                        {message && <div className="mt-2 text-center text-red-700 font-black text-sm md:text-xl bg-red-50 py-2 rounded-lg border border-red-200 font-sans">{message}</div>}
+                        </div>
+                    )}
+                    </div>
+                )}
+            </>
+          )}
+        </div>
+
+        {/* 右側：草稿區 (手機隱藏，lg 以上顯示) */}
+        <div className="hidden lg:flex w-[360px] xl:w-[420px] shrink-0 flex-col bg-white rounded-xl shadow-2xl border-t-[12px] border-t-indigo-100 border border-slate-300 overflow-hidden font-sans" style={{backgroundImage: 'linear-gradient(#e2e8f0 1px, transparent 1px), linear-gradient(90deg, #e2e8f0 1px, transparent 1px)', backgroundSize: '25px 25px'}}>
+            <div className="p-4 bg-white/90 border-b-2 border-slate-100 flex items-center justify-between shrink-0">
+              <h3 className="font-black text-slate-700 flex items-center gap-2 text-2xl font-sans"><PenTool size={24}/> 計算草稿</h3>
+              <button onClick={clearCanvas} className="bg-slate-100 px-4 py-2 rounded-lg text-slate-500 border border-slate-200 font-black text-lg flex items-center gap-2 hover:bg-white transition-all font-sans"><Eraser size={20} /> 擦掉</button>
+            </div>
+            <div className="flex-1 relative cursor-crosshair font-sans">
+              <canvas ref={canvasRef} className="absolute inset-0 w-full h-full touch-none" onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseOut={stopDrawing} onTouchStart={startDrawing} onTouchMove={draw} onTouchEnd={stopDrawing} />
+              {!gameState.includes('playing') && !gameState.includes('roundResult') && <div className="absolute inset-0 flex items-center justify-center text-slate-300 font-black px-10 text-center text-xl pointer-events-none opacity-50 italic font-sans">可以在方格紙上<br/>計算直式喔！</div>}
+            </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default App;
